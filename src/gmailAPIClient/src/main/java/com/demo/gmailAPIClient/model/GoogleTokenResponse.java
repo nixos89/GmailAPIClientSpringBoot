@@ -5,6 +5,6 @@ import com.google.api.client.util.Key;
 
 public class GoogleTokenResponse extends TokenResponse {
 
-  @Key("expires_in")
-  private Integer expiresInSeconds;
+	@Key("expires_in")
+	private Integer expiresInSeconds;
 }

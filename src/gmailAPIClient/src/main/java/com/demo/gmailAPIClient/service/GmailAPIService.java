@@ -11,9 +11,7 @@ import com.google.api.client.json.JsonFactory;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.gmail.Gmail;
 import com.google.api.services.gmail.model.Message;
-
 import lombok.SneakyThrows;
-
 import org.apache.commons.codec.binary.Base64;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -40,197 +38,112 @@ import java.util.Properties;
 @Service
 public class GmailAPIService {
 
-  private static final JsonFactory JSON_FACTORY = GsonFactory.getDefaultInstance();
-  private HttpTransport httpTransport;
-  private GmailCredential gmailCredential;
-  @Value("${spring.google.client-id}")
-  private String clientId;
-  @Value("${spring.google.client-secret}")
-  private String secretKey;
-  @Value("${spring.google.refresh-token}")
-  private String refreshToken;
-  @Value("${spring.google.from-email}")
-  private String fromEmail;
-  @Value("${spring.google.to-email}")
-  private String toEmail;
+	private static final JsonFactory JSON_FACTORY = GsonFactory.getDefaultInstance();
+	private HttpTransport httpTransport;
+	private GmailCredential gmailCredential;
+	@Value("${spring.google.client-id}")
+	private String clientId;
+	@Value("${spring.google.client-secret}")
+	private String secretKey;
+	@Value("${spring.google.refresh-token}")
+	private String refreshToken;
+	@Value("${spring.google.from-email}")
+	private String fromEmail;
+	@Value("${spring.google.to-email}")
+	private String toEmail;
 
-  @SneakyThrows
-  public GmailAPIService() {
+	@SneakyThrows
+	public GmailAPIService() {
 
-    this.httpTransport = GoogleNetHttpTransport.newTrustedTransport();
+		this.httpTransport = GoogleNetHttpTransport.newTrustedTransport();
 
-    this.gmailCredential = new GmailCredential(
-      clientId,
-      secretKey,
-      refreshToken,
-      null,
-      null,
-      fromEmail
-    );
+		this.gmailCredential = new GmailCredential(clientId, secretKey, refreshToken, null, null, fromEmail);
 
-  }
+	}
 
-  public boolean sendMessage(
-    String subject,
-    String body,
-    MultipartFile attachment) throws MessagingException, IOException {
+	public boolean sendMessage(String subject, String body, MultipartFile attachment) throws MessagingException, IOException {
+		refreshAccessToken();
+		Message message = createMessageWithEmail(createEmail(toEmail, gmailCredential.userEmail(), subject, body, attachment));
+		return createGmail().users().messages().send(gmailCredential.userEmail(), message).execute().getLabelIds().contains("SENT");
+	}
 
-    refreshAccessToken();
+	private Gmail createGmail() {
 
-    Message message = createMessageWithEmail(
-      createEmail(toEmail, gmailCredential.userEmail(), subject, body, attachment));
+		Credential credential = authorize();
 
-    return createGmail()
-      .users()
-      .messages()
-      .send(gmailCredential.userEmail(), message)
-      .execute()
-      .getLabelIds()
-      .contains("SENT");
+		return new Gmail.Builder(httpTransport, JSON_FACTORY, credential).build();
 
-  }
+	}
 
-  private Gmail createGmail() {
+	private MimeMessage createEmail(String to, String from, String subject, String bodyText, MultipartFile attachment) throws MessagingException {
+		MimeMessage email = new MimeMessage(Session.getDefaultInstance(new Properties(), null));
+		email.setFrom(new InternetAddress(from));
+		email.addRecipient(javax.mail.Message.RecipientType.TO, new InternetAddress(to));
+		email.setSubject(subject);
+		email.setText(bodyText);
+		email = addAttachmentToEmail(email, bodyText, attachment);
+		return email;
+	}
 
-    Credential credential = authorize();
+	private MimeMessage addAttachmentToEmail(MimeMessage email, String bodyText, MultipartFile attachment) {
+		if (attachment.isEmpty()) {
+			return email;
+		}
 
-    return new Gmail.Builder(httpTransport, JSON_FACTORY, credential)
-      .build();
+		try {
+			Multipart multipart = new MimeMultipart();
+			MimeBodyPart mimeBodyPart = new MimeBodyPart();
+			mimeBodyPart.setContent(bodyText, "text/plain");
 
-  }
+			multipart.addBodyPart(mimeBodyPart);
 
-  private MimeMessage createEmail(
-    String to,
-    String from,
-    String subject,
-    String bodyText,
-    MultipartFile attachment) throws MessagingException {
+			mimeBodyPart = new MimeBodyPart();
 
-    MimeMessage email = new MimeMessage(Session.getDefaultInstance(new Properties(), null));
+			DataSource ds = new ByteArrayDataSource(attachment.getBytes(), attachment.getContentType());
+			mimeBodyPart.setDataHandler(new DataHandler(ds));
+			mimeBodyPart.setFileName(attachment.getOriginalFilename());
+			multipart.addBodyPart(mimeBodyPart);
 
-    email.setFrom(new InternetAddress(from));
+			email.setContent(multipart);
+		} catch (Exception e) {
+			e.printStackTrace();
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not able to process request");
+		}
 
-    email.addRecipient(javax.mail.Message.RecipientType.TO, new InternetAddress(to));
+		return email;
+	}
 
-    email.setSubject(subject);
+	private Message createMessageWithEmail(MimeMessage emailContent) throws MessagingException, IOException {
+		ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+		emailContent.writeTo(buffer);
 
-    email.setText(bodyText);
+		return new Message().setRaw(Base64.encodeBase64URLSafeString(buffer.toByteArray()));
+	}
 
-    email = addAttachmentToEmail(email, bodyText, attachment);
+	private Credential authorize() {
+		try {
+			TokenResponse tokenResponse = refreshAccessToken();
+			return new Credential(BearerToken.authorizationHeaderAccessMethod()).setFromTokenResponse(tokenResponse);
+		} catch (Exception e) {
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not able to process request.");
+		}
 
-    return email;
+	}
 
-  }
+	private TokenResponse refreshAccessToken() {
+		RestTemplate restTemplate = new RestTemplate();
+		GmailCredential gmailCredentialsDto = new GmailCredential(clientId, secretKey, refreshToken, "refresh_token", null, null);
+		HttpEntity<GmailCredential> entity = new HttpEntity(gmailCredentialsDto);
 
-  private MimeMessage addAttachmentToEmail(MimeMessage email, String bodyText,
-    MultipartFile attachment) {
+		try {
+			GoogleTokenResponse response = restTemplate.postForObject("https://www.googleapis.com/oauth2/v4/token", entity, GoogleTokenResponse.class);
+			gmailCredential = new GmailCredential(clientId, secretKey, refreshToken, null, response.getAccessToken(), fromEmail);
 
-    if (attachment.isEmpty()) {
-      return email;
-    }
-
-    try {
-
-      Multipart multipart = new MimeMultipart();
-
-      MimeBodyPart mimeBodyPart = new MimeBodyPart();
-
-      mimeBodyPart.setContent(bodyText, "text/plain");
-
-      multipart.addBodyPart(mimeBodyPart);
-
-      mimeBodyPart = new MimeBodyPart();
-
-      DataSource ds = new ByteArrayDataSource(attachment.getBytes(), attachment.getContentType());
-      mimeBodyPart.setDataHandler(new DataHandler(ds));
-      mimeBodyPart.setFileName(attachment.getOriginalFilename());
-
-      multipart.addBodyPart(mimeBodyPart);
-
-      email.setContent(multipart);
-
-    } catch (Exception e) {
-
-      e.printStackTrace();
-
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-        "Not able to process request");
-
-    }
-
-    return email;
-
-  }
-
-  private Message createMessageWithEmail(MimeMessage emailContent)
-    throws MessagingException, IOException {
-
-    ByteArrayOutputStream buffer = new ByteArrayOutputStream();
-    emailContent.writeTo(buffer);
-
-    return new Message()
-      .setRaw(Base64.encodeBase64URLSafeString(buffer.toByteArray()));
-  }
-
-  private Credential authorize() {
-
-    try {
-
-      TokenResponse tokenResponse = refreshAccessToken();
-
-      return new Credential(BearerToken.authorizationHeaderAccessMethod()).setFromTokenResponse(
-        tokenResponse);
-
-    } catch (Exception e) {
-
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-        "Not able to process request.");
-
-    }
-
-  }
-
-  private TokenResponse refreshAccessToken() {
-
-    RestTemplate restTemplate = new RestTemplate();
-
-    GmailCredential gmailCredentialsDto = new GmailCredential(
-      clientId,
-      secretKey,
-      refreshToken,
-      "refresh_token",
-      null,
-      null
-    );
-
-    HttpEntity<GmailCredential> entity = new HttpEntity(gmailCredentialsDto);
-
-    try {
-
-      GoogleTokenResponse response = restTemplate.postForObject(
-        "https://www.googleapis.com/oauth2/v4/token",
-        entity,
-        GoogleTokenResponse.class);
-
-      gmailCredential = new GmailCredential(
-        clientId,
-        secretKey,
-        refreshToken,
-        null,
-        response.getAccessToken(),
-        fromEmail
-      );
-
-      return response;
-
-    } catch (Exception e) {
-
-      e.printStackTrace();
-
-      throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-        "Not able to process request.");
-
-    }
-  }
+			return response;
+		} catch (Exception e) {
+			e.printStackTrace();
+			throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Not able to process request.");
+		}
+	}
 
 }
